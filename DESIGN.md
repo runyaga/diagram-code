@@ -1,124 +1,134 @@
-# DESIGN: diagram-as-code
+# Design: diagram-as-code
 
-LLM-driven architecture diagram generation using the Python [diagrams](https://diagrams.mingrammer.com/) library.
+## Overview
 
-## Architecture
+This system generates architecture diagrams by:
+1. Capturing entities and their relationships in a declarative **SPEC.md** file
+2. Using **LLMs** to transform that specification into Python code
+3. Executing the code against the [diagrams](https://diagrams.mingrammer.com/) library to produce PNG output
+
+## Core Concept
 
 ```
-User Input                    SPEC.md File
-(natural language)            (declarative)
-      |                            |
-      v                            v
-+--------------+              +-----------+
-|   Analyzer   |              |  Parser   |
-+------+-------+              +-----+-----+
-       |                            |
-       +------------+---------------+
-                    v
-            +--------------+
-            |  Generator   |
-            +-------+------+
-                    |
-       +------------+------------+
-       v                         v
-   Direct (A)              Structured (B)
-   Python Code             DiagramSpec -> Renderer
-       |                         |
-       +-----------+-------------+
-                   v
-              PNG Diagram
-                   |
-                   v
-           +--------------+
-           | VLM Verifier |  (optional)
-           +--------------+
+SPEC.md  --(LLM)--> Python code --(diagrams lib)--> PNG
 ```
 
-## Generation Modes
+The SPEC.md format provides a human-readable, version-controllable way to define architecture:
+- **Components**: Named entities with types (e.g., `alb`, `ec2`, `rds`)
+- **Connections**: Directed edges between components
+- **Clusters**: Logical groupings with optional hierarchy
 
-| Mode | Flow | Trade-off |
-|------|------|-----------|
-| **Direct** | LLM -> Python code -> PNG | Flexible but variable output, may produce syntax errors |
-| **Structured** | LLM -> DiagramSpec -> Renderer -> PNG | Constrained but deterministic, more reliable execution |
+The LLM's job is to map these declarative definitions to the appropriate `diagrams` library imports and constructs.
+
+## Agent Architecture
+
+The system uses [pydantic-ai](https://ai.pydantic.dev/) agents with typed Pydantic response models. Each agent has a constrained output schema, ensuring the LLM returns structured, validated data.
+
+### Agents
+
+| Agent | Input | Output Model | Purpose |
+|-------|-------|--------------|---------|
+| **Analyzer** | Natural language description | `AnalysisResponse` | Extracts components, connections, clusters; identifies ambiguities |
+| **Generator** | Architecture context | `SpecGenerationResponse` | Produces validated `DiagramSpec` |
+| **Refiner** | Feedback + current spec | `SpecRefinementResponse` | Modifies existing spec based on user feedback |
+
+### Generation Process (Structured)
+
+```
+1. ANALYZE
+   User input --> Analyzer Agent --> AnalysisResponse
+                                     - identified_components[]
+                                     - identified_connections[]
+                                     - suggested_clusters[]
+                                     - confidence score
+                                     - ready_to_generate flag
+
+2. GENERATE
+   AnalysisResponse --> Generator Agent --> SpecGenerationResponse
+                                            - DiagramSpec (nodes, edges, clusters)
+                                            - explanation
+                                            - warnings[]
+
+3. REFINE (optional, iterative)
+   User feedback + DiagramSpec --> Refiner Agent --> SpecRefinementResponse
+                                                     - understood_changes[]
+                                                     - updated DiagramSpec
+
+4. RENDER
+   DiagramSpec --> Deterministic Renderer --> Python code --> PNG
+```
+
+### Agent Context
+
+All agents share an `AgentContext` that maintains:
+- **Conversation history**: Rolling window of user/assistant messages
+- **Current spec**: The latest `DiagramSpec` (for refinement)
+- **Output path**: Where to write generated artifacts
+
+Agents access context via tools:
+- `get_conversation_history()` - Recent conversation for context
+- `get_current_spec()` - Current DiagramSpec as JSON (Refiner only)
+- `get_available_node_types()` - Valid node type enum values
+
+### Response Models
+
+```python
+# Analyzer output
+AnalysisResponse:
+    summary: str
+    identified_components: list[str]
+    identified_connections: list[str]
+    suggested_clusters: list[str]
+    confidence: float  # 0.0-1.0
+    ready_to_generate: bool
+
+# Generator output
+SpecGenerationResponse:
+    spec: DiagramSpec
+    explanation: str
+    warnings: list[str]
+
+# Refiner output
+SpecRefinementResponse:
+    understood_changes: list[str]
+    updated_spec: DiagramSpec
+    explanation: str
+```
 
 ## Data Model
 
-```python
-class DiagramSpec:
-    name: str                    # Diagram title
-    direction: str               # TB, BT, LR, RL
-    nodes: list[DiagramNode]     # id, label, node_type
-    edges: list[DiagramEdge]     # source, target, label
-    clusters: list[DiagramCluster]  # id, label, node_ids, parent_cluster_id
+The intermediate representation (`DiagramSpec`) used by structured generation:
+
+| Model | Fields |
+|-------|--------|
+| `DiagramSpec` | name, direction, nodes, edges, clusters |
+| `DiagramNode` | id, label, node_type |
+| `DiagramEdge` | source, target, label |
+| `DiagramCluster` | id, label, node_ids, parent_cluster_id |
+
+## Generation Approaches
+
+### Structured (Default)
+
+```
+SPEC.md --> Analyzer --> Generator --> DiagramSpec --> Renderer --> Python --> PNG
 ```
 
-## Node Types -> Diagrams Library
+The LLM outputs validated Pydantic models at each step. A deterministic renderer converts the final `DiagramSpec` to Python code. This approach is **constrained but reliable**.
 
-| NodeType | Import |
-|----------|--------|
-| `ec2`, `lambda`, `ecs`, `eks` | `diagrams.aws.compute.*` |
-| `alb`, `nlb`, `waf`, `route53` | `diagrams.aws.network.*` / `security.*` |
-| `s3`, `efs`, `ebs` | `diagrams.aws.storage.*` |
-| `rds`, `aurora`, `dynamodb`, `elasticache` | `diagrams.aws.database.*` |
-| `nginx` | `diagrams.onprem.network.Nginx` |
-| `postgresql` | `diagrams.onprem.database.PostgreSQL` |
-| `ollama`, `lancedb`, `custom` | `diagrams.onprem.compute.Server` |
+### Direct
 
-## SPEC.md Format
-
-Declarative markdown format for non-interactive mode. SPEC.md files are **manually authored** to describe your target architecture:
-
-```markdown
-# Title
-
-Description of the architecture...
-
-## Components
-- **node_id**: Label | node_type | description
-
-## Connections
-- source_id -> target_id | label
-
-## Clusters
-- **cluster_id**: Label | node_id1, node_id2
-- parent: parent_cluster_id
-
-## Expected Results
-- Total: N nodes
-- (optional ground truth counts for evaluation)
+```
+SPEC.md --> Analyzer --> Code Generator --> Python --> PNG
 ```
 
-## Evaluation
+The LLM generates executable Python directly, bypassing the intermediate spec. This is **flexible but variable**—the LLM has full control but may produce invalid code.
 
-Two-level accuracy measurement:
+## Verification
 
-1. **Count-based**: Compare generated node/edge/cluster counts against SPEC.md
-2. **VLM-based**: Analyze generated PNG with vision model to verify correct components rendered
+Optional VLM (Vision Language Model) verification analyzes the generated PNG to confirm components match the specification. This enables automated accuracy measurement for evaluation.
 
-```bash
-python example/run_evaluation.py              # Full evaluation with VLM
-python example/run_evaluation.py --skip-vlm   # Count-only (faster)
-```
+## See Also
 
-### Provider Configuration
-
-```bash
-# OpenAI
-LLM_PROVIDER=openai OPENAI_API_KEY="sk-..." python example/run_evaluation.py
-
-# Ollama (local)
-LLM_PROVIDER=ollama OLLAMA_MODEL=gpt-oss:20b OLLAMA_VLM_MODEL=qwen3-vl:8b python example/run_evaluation.py
-```
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `prompts.py` | LLM system prompts for analyzer, generator, refiner |
-| `models.py` | Pydantic models: DiagramSpec, DiagramNode, DiagramEdge, DiagramCluster |
-| `renderer.py` | DiagramSpec -> Python code (deterministic) |
-| `spec_parser.py` | SPEC.md -> DiagramSpec |
-| `vlm_verifier.py` | PNG diagram analysis and verification |
-| `solutions/direct.py` | Direct code generation agent |
-| `solutions/structured.py` | Structured spec generation agent |
-| `config.py` | LLM provider configuration (OpenAI/Ollama) |
+- [README.md](README.md) - Installation, usage, and API reference
+- [example/SPEC.md](example/SPEC.md) - Complete AWS VPC architecture example
