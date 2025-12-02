@@ -32,13 +32,15 @@ code-de-diagram --spec example/SPEC.md --output ./output
 Set your LLM provider via environment variables:
 
 ```bash
-# OpenAI (default)
+# OpenAI
+export LLM_PROVIDER="openai"
 export OPENAI_API_KEY="sk-..."
-export OPENAI_MODEL="gpt-4o"  # defaults to gpt-4o-mini
+export OPENAI_MODEL="gpt-4o"      # default: gpt-4o
 
 # Ollama (local)
 export LLM_PROVIDER="ollama"
-export OLLAMA_MODEL="qwen3:latest"
+export OLLAMA_MODEL="gpt-oss:20b"      # default: gpt-oss:20b
+export OLLAMA_VLM_MODEL="qwen3-vl:8b"  # default: qwen3-vl:8b (for VLM verification)
 export OLLAMA_BASE_URL="http://localhost:11434"
 ```
 
@@ -52,7 +54,7 @@ $ code-de-diagram
 ============================================================
 diagram-as-code - Structured Generation
 ============================================================
-Provider: openai | Model: gpt-4o-mini
+Provider: openai | Model: gpt-4o
 
 Describe your architecture. Commands: quit, spec, code, run
 
@@ -126,8 +128,96 @@ success, message, code = render_and_execute(spec, "my_diagram")
 
 | Mode | Description | Best For |
 |------|-------------|----------|
-| **Structured** (default) | LLM generates validated `DiagramSpec`, deterministic renderer produces code | Consistent output, easy iteration, schema validation |
-| **Direct** | LLM generates executable Python directly | Maximum flexibility, custom layouts |
+| **Structured** (default) | LLM generates validated `DiagramSpec`, deterministic renderer produces code | Consistent output, reliable execution, easy iteration |
+| **Direct** | LLM generates executable Python directly | Maximum flexibility, custom layouts (may produce errors) |
+
+## SPEC.md Workflow
+
+SPEC.md files are **manually authored** to declaratively describe your target architecture. They serve as both input and ground truth for diagram generation.
+
+### Creating a SPEC.md
+
+1. Start from a reference diagram or architecture description
+2. Define components with IDs, labels, and types
+3. Define connections between components
+4. Define clusters/groupings with hierarchy
+5. (Optional) Add expected counts for evaluation
+
+### SPEC.md Format
+
+```markdown
+# Architecture Title
+
+Description of the architecture...
+
+## Components
+- **node_id**: Label | node_type | description
+
+## Connections
+- source_id -> target_id | label
+
+## Clusters
+- **cluster_id**: Label | node_id1, node_id2
+- parent: parent_cluster_id
+
+## Expected Results
+- Total: 10 nodes
+- Total: 8 edges
+- Total: 3 clusters
+```
+
+See [example/SPEC.md](example/SPEC.md) for a complete AWS VPC example.
+
+### Running from SPEC.md
+
+```bash
+# Generate diagram using structured approach (default)
+code-de-diagram --spec example/SPEC.md --output ./output
+
+# Generate using direct approach
+code-de-diagram --spec example/SPEC.md --output ./output --solution direct
+
+# Output results as JSON (for scripting)
+code-de-diagram --spec example/SPEC.md --json
+```
+
+## Evaluation
+
+Compare both generation approaches against your SPEC.md ground truth:
+
+```bash
+# Full evaluation with VLM verification
+python example/run_evaluation.py --output example/output
+
+# Skip VLM verification (faster)
+python example/run_evaluation.py --output example/output --skip-vlm
+```
+
+### Provider-specific Evaluation
+
+```bash
+# OpenAI
+OPENAI_API_KEY="sk-..." LLM_PROVIDER=openai \
+  python example/run_evaluation.py --output example/output-openai
+
+# Ollama
+LLM_PROVIDER=ollama OLLAMA_MODEL=gpt-oss:20b OLLAMA_VLM_MODEL=qwen3-vl:8b \
+  python example/run_evaluation.py --output example/output-ollama
+```
+
+### Evaluation Output
+
+```
+example/output/
+├── direct/
+│   ├── direct_generated.py      # Generated Python code
+│   └── diagram.png              # Rendered diagram
+├── structured/
+│   ├── structured_generated.py  # Generated Python code
+│   ├── structured_generated_spec.json  # Intermediate DiagramSpec
+│   └── diagram.png              # Rendered diagram
+└── evaluation_results.json      # Full comparison metrics
+```
 
 ## Supported Node Types
 
@@ -141,51 +231,84 @@ success, message, code = render_and_execute(spec, "my_diagram")
 | On-prem | `nginx`, `postgresql`, `generic_compute`, `generic_database` |
 | Custom | `ollama`, `lancedb`, `custom` |
 
-## SPEC.md Format
-
-```markdown
-# Architecture Title
-
-Description...
-
-## Components
-- **id**: Label | node_type | description
-
-## Connections
-- source_id -> target_id | label
-
-## Clusters
-- **cluster_id**: Label | node_id1, node_id2
-- parent: parent_cluster_id
-```
-
-See [example/SPEC.md](example/SPEC.md) for a complete example.
-
 ## Project Structure
 
 ```
 code_de_diagram/
 ├── cli.py           # CLI entry points
-├── config.py        # LLM configuration
+├── config.py        # LLM configuration (OpenAI/Ollama)
 ├── models.py        # Pydantic data models
 ├── prompts.py       # LLM system prompts
-├── renderer.py      # DiagramSpec → Python code
+├── renderer.py      # DiagramSpec -> Python code
 ├── spec_parser.py   # SPEC.md file parser
+├── vlm_verifier.py  # VLM-based diagram verification
 └── solutions/
     ├── direct.py    # Direct code generation
     └── structured.py # Structured spec generation
 
 example/
-├── SPEC.md              # Sample architecture spec
-├── reference-diagram.png
-└── run_evaluation.py    # Compare generation modes
+├── SPEC.md              # Sample AWS VPC architecture spec
+├── aws-diagram.png      # Reference diagram
+└── run_evaluation.py    # Evaluation runner
 ```
 
 ## Testing
 
+### Install Dev Dependencies
+
 ```bash
-pytest tests/ -v
+pip install -e ".[dev]"
+# or with uv
+uv sync --extra dev
 ```
+
+### Run All Unit Tests
+
+```bash
+pytest tests/ -v -m "not integration"
+```
+
+### Run Integration Tests (requires LLM/VLM)
+
+```bash
+# All integration tests
+pytest tests/ -v -m "integration"
+
+# LLM smoke tests only
+pytest tests/test_integration_llm.py -v -m "integration"
+
+# VLM smoke tests only
+pytest tests/test_integration_vlm.py -v -m "integration"
+```
+
+### Test Categories
+
+| Category | Command | Description |
+|----------|---------|-------------|
+| Unit | `-m "not integration"` | Fast tests, no network (136 tests) |
+| Integration | `-m "integration"` | Requires LLM/VLM services (41 tests) |
+| Slow | `-m "integration and slow"` | Actual LLM API calls |
+
+### Test Files
+
+| File | Coverage |
+|------|----------|
+| `test_config.py` | LLM provider configuration |
+| `test_models.py` | Pydantic data models |
+| `test_renderer.py` | DiagramSpec to Python code |
+| `test_spec_parser.py` | SPEC.md parsing |
+| `test_integration_llm.py` | LLM connectivity and smoke tests |
+| `test_integration_vlm.py` | VLM analysis and verification |
+| `test_solution_direct.py` | DirectGenerationAgent |
+| `test_solution_structured.py` | StructuredAgent |
+| `test_e2e.py` | End-to-end pipeline |
+
+### Key Smoke Tests
+
+- **`test_ollama_server_reachable`** - Verify Ollama is running
+- **`test_analyzer_returns_structured_response`** - Verify LLM returns valid Pydantic models
+- **`test_analyze_diagram_returns_analysis`** - Verify VLM can analyze diagram images
+- **`test_full_verification_returns_complete_results`** - Full VLM verification pipeline
 
 ## Documentation
 
